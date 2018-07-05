@@ -3,7 +3,7 @@ package consul
 import (
 	"time"
 
-	"github.com/AcalephStorage/consul-alerts/notifier"
+	notifier "github.com/AcalephStorage/consul-alerts/notifier"
 )
 
 // Event data from consul
@@ -32,7 +32,7 @@ type Check struct {
 type ConsulAlertConfig struct {
 	Checks    *ChecksConfig
 	Events    *EventsConfig
-	Notifiers *NotifiersConfig
+	Notifiers *notifier.Notifiers
 }
 
 type ChecksConfig struct {
@@ -43,84 +43,6 @@ type ChecksConfig struct {
 type EventsConfig struct {
 	Enabled  bool
 	Handlers []string
-}
-
-type NotifiersConfig struct {
-	Email     *EmailNotifierConfig
-	Log       *LogNotifierConfig
-	Influxdb  *InfluxdbNotifierConfig
-	Slack     *SlackNotifierConfig
-	PagerDuty *PagerDutyNotifierConfig
-	HipChat   *HipChatNotifierConfig
-	OpsGenie  *OpsGenieNotifierConfig
-	AwsSns    *AwsSnsNotifierConfig
-	Custom    []string
-}
-
-type EmailNotifierConfig struct {
-	ClusterName string
-	Enabled     bool
-	Url         string
-	Port        int
-	Username    string
-	Password    string
-	SenderAlias string
-	SenderEmail string
-	Receivers   []string
-	Template    string
-}
-
-type LogNotifierConfig struct {
-	Enabled bool
-	Path    string
-}
-
-type InfluxdbNotifierConfig struct {
-	Enabled    bool
-	Host       string
-	Username   string
-	Password   string
-	Database   string
-	SeriesName string
-}
-
-type SlackNotifierConfig struct {
-	Enabled     bool
-	ClusterName string
-	Url         string
-	Channel     string
-	Username    string
-	IconUrl     string
-	IconEmoji   string
-	Detailed    bool
-}
-
-type PagerDutyNotifierConfig struct {
-	Enabled    bool
-	ServiceKey string
-	ClientName string
-	ClientUrl  string
-}
-
-type HipChatNotifierConfig struct {
-	Enabled     bool
-	ClusterName string
-	RoomId      string
-	AuthToken   string
-	BaseURL     string
-	From        string
-}
-
-type OpsGenieNotifierConfig struct {
-	Enabled     bool
-	ClusterName string
-	ApiKey      string
-}
-
-type AwsSnsNotifierConfig struct {
-	Enabled  bool
-	Region   string
-	TopicArn string
 }
 
 type Status struct {
@@ -134,8 +56,9 @@ type Status struct {
 
 // ProfileInfo is for reading in JSON from profile keys
 type ProfileInfo struct {
-	Interval  int
-	NotifList map[string]bool
+	Interval     int
+	NotifList    map[string]bool
+	VarOverrides notifier.Notifiers
 }
 
 // Consul interface provides access to consul client
@@ -146,18 +69,22 @@ type Consul interface {
 	ChecksEnabled() bool
 	EventHandlers(eventName string) []string
 
-	EmailConfig() *EmailNotifierConfig
-	LogConfig() *LogNotifierConfig
-	InfluxdbConfig() *InfluxdbNotifierConfig
-	SlackConfig() *SlackNotifierConfig
-	PagerDutyConfig() *PagerDutyNotifierConfig
-	HipChatConfig() *HipChatNotifierConfig
-	OpsGenieConfig() *OpsGenieNotifierConfig
-	AwsSnsConfig() *AwsSnsNotifierConfig
+	EmailNotifier() *notifier.EmailNotifier
+	LogNotifier() *notifier.LogNotifier
+	InfluxdbNotifier() *notifier.InfluxdbNotifier
+	SlackNotifier() *notifier.SlackNotifier
+	MattermostNotifier() *notifier.MattermostNotifier
+	MattermostWebhookNotifier() *notifier.MattermostWebhookNotifier
+	PagerDutyNotifier() *notifier.PagerDutyNotifier
+	HipChatNotifier() *notifier.HipChatNotifier
+	OpsGenieNotifier() *notifier.OpsGenieNotifier
+	AwsSnsNotifier() *notifier.AwsSnsNotifier
+	VictorOpsNotifier() *notifier.VictorOpsNotifier
 
 	CheckChangeThreshold() int
 	UpdateCheckData()
 	NewAlerts() []Check
+	NewAlertsWithFilter(node string, service string, checkId string, statuses []string, ignoreBlacklist bool) []Check
 
 	IsBlacklisted(check *Check) bool
 
@@ -166,11 +93,11 @@ type Consul interface {
 	CheckStatus(node, statusId, checkId string) (status, output string)
 	CheckKeyExists(key string) bool
 
-	GetProfileInfo(node, serviceID, checkID string) (notifiersList map[string]bool, interval int)
+	GetProfileInfo(node, serviceID, checkID string) ProfileInfo
 
 	GetReminders() []notifier.Message
 	SetReminder(m notifier.Message)
-	DeleteReminder(node string)
+	DeleteReminder(node string, checkid string)
 }
 
 // DefaultAlertConfig loads default config settings
@@ -186,56 +113,74 @@ func DefaultAlertConfig() *ConsulAlertConfig {
 		Handlers: []string{},
 	}
 
-	email := &EmailNotifierConfig{
+	email := &notifier.EmailNotifier{
 		ClusterName: "Consul-Alerts",
 		Enabled:     false,
 		SenderAlias: "Consul Alerts",
 		Receivers:   []string{},
 	}
 
-	log := &LogNotifierConfig{
+	log := &notifier.LogNotifier{
 		Enabled: true,
 		Path:    "/tmp/consul-notifications.log",
 	}
 
-	influxdb := &InfluxdbNotifierConfig{
+	influxdb := &notifier.InfluxdbNotifier{
 		Enabled:    false,
 		SeriesName: "consul-alerts",
 	}
 
-	slack := &SlackNotifierConfig{
+	slack := &notifier.SlackNotifier{
 		Enabled:     false,
 		ClusterName: "Consul-Alerts",
 	}
 
-	pagerduty := &PagerDutyNotifierConfig{
+	mattermost := &notifier.MattermostNotifier{
+		Enabled:     false,
+		ClusterName: "Consul-Alerts",
+	}
+
+	mattermostWebhook := &notifier.MattermostWebhookNotifier{
+		Enabled:     false,
+		ClusterName: "Consul-Alerts",
+	}
+
+	pagerduty := &notifier.PagerDutyNotifier{
 		Enabled: false,
 	}
 
-	hipchat := &HipChatNotifierConfig{
+	hipchat := &notifier.HipChatNotifier{
 		Enabled:     false,
 		ClusterName: "Consul-Alerts",
 	}
 
-	opsgenie := &OpsGenieNotifierConfig{
+	opsgenie := &notifier.OpsGenieNotifier{
 		Enabled:     false,
 		ClusterName: "Consul-Alerts",
 	}
 
-	awsSns := &AwsSnsNotifierConfig{
+	awsSns := &notifier.AwsSnsNotifier{
+		Enabled:     false,
+		ClusterName: "Consul-Alerts",
+	}
+
+	victorOps := &notifier.VictorOpsNotifier{
 		Enabled: false,
 	}
 
-	notifiers := &NotifiersConfig{
-		Email:     email,
-		Log:       log,
-		Influxdb:  influxdb,
-		Slack:     slack,
-		PagerDuty: pagerduty,
-		HipChat:   hipchat,
-		OpsGenie:  opsgenie,
-		AwsSns:    awsSns,
-		Custom:    []string{},
+	notifiers := &notifier.Notifiers{
+		Email:             email,
+		Log:               log,
+		Influxdb:          influxdb,
+		Slack:             slack,
+		Mattermost:        mattermost,
+		MattermostWebhook: mattermostWebhook,
+		PagerDuty:         pagerduty,
+		HipChat:           hipchat,
+		OpsGenie:          opsgenie,
+		AwsSns:            awsSns,
+		VictorOps:         victorOps,
+		Custom:            []string{},
 	}
 
 	return &ConsulAlertConfig{

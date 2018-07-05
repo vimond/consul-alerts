@@ -10,6 +10,9 @@ import (
 	"net/http"
 	"os/signal"
 
+	"encoding/json"
+	"io/ioutil"
+
 	"github.com/AcalephStorage/consul-alerts/consul"
 	"github.com/AcalephStorage/consul-alerts/notifier"
 
@@ -17,11 +20,11 @@ import (
 	"github.com/AcalephStorage/consul-alerts/Godeps/_workspace/src/github.com/docopt/docopt-go"
 )
 
-const version = "Consul Alerts 0.3.3"
+const version = "Consul Alerts 0.5.0"
 const usage = `Consul Alerts.
 
 Usage:
-  consul-alerts start [--alert-addr=<addr>] [--consul-addr=<consuladdr>] [--consul-dc=<dc>] [--consul-acl-token=<token>] [--watch-checks] [--watch-events] [--log-level=<level>]
+  consul-alerts start [--alert-addr=<addr>] [--consul-addr=<consuladdr>] [--consul-dc=<dc>] [--consul-acl-token=<token>] [--watch-checks] [--watch-events] [--log-level=<level>] [--config-file=<file>]
   consul-alerts watch (checks|event) [--alert-addr=<addr>] [--log-level=<level>]
   consul-alerts --help
   consul-alerts --version
@@ -31,11 +34,12 @@ Options:
   --alert-addr=<addr>          The address for the consul-alert api [default: localhost:9000].
   --consul-addr=<consuladdr>   The consul api address [default: localhost:8500].
   --consul-dc=<dc>             The consul datacenter [default: dc1].
+  --log-level=<level>          Set the logging level - valid values are "debug", "info", "warn", and "err" [default: warn].
   --watch-checks               Run check watcher.
   --watch-events               Run event watcher.
-  --log-level=<level>          Set the logging level - valid values are "debug", "info", "warn", and "err" [default: warn].
   --help                       Show this screen.
   --version                    Show version.
+  --config-file=<file>         Path to the configuration file in JSON format
 
 `
 
@@ -58,7 +62,66 @@ func main() {
 }
 
 func daemonMode(arguments map[string]interface{}) {
-	loglevelString, _ := arguments["--log-level"].(string)
+
+	// Define options before setting in either config file or on command line
+	loglevelString := ""
+	consulAclToken := ""
+	consulAddr := ""
+	consulDc := ""
+	watchChecks := false
+	watchEvents := false
+	addr := ""
+	var confData map[string]interface{}
+
+	// This exists check only works for arguments with no default. arguments with defaults will always exist.
+	// Because of this the current code overrides command line flags with config file options if set.
+	if configFile, exists := arguments["--config-file"].(string); exists {
+		file, err := ioutil.ReadFile(configFile)
+		if err != nil {
+			log.Error(err)
+		}
+		err = json.Unmarshal(file, &confData)
+		if err != nil {
+			log.Error(err)
+		}
+		log.Debug("Config data: ", confData)
+	}
+
+	if confData["log-level"] != nil {
+		loglevelString = confData["log-level"].(string)
+	} else {
+		loglevelString = arguments["--log-level"].(string)
+	}
+	if confData["consul-acl-token"] != nil {
+		consulAclToken = confData["consul-acl-token"].(string)
+	} else {
+		consulAclToken = arguments["--consul-acl-token"].(string)
+	}
+	if confData["consul-addr"] != nil {
+		consulAddr = confData["consul-addr"].(string)
+	} else {
+		consulAddr = arguments["--consul-addr"].(string)
+	}
+	if confData["consul-dc"] != nil {
+		consulDc = confData["consul-dc"].(string)
+	} else {
+		consulDc = arguments["--consul-dc"].(string)
+	}
+	if confData["alert-addr"] != nil {
+		addr = confData["alert-addr"].(string)
+	} else {
+		addr = arguments["--alert-addr"].(string)
+	}
+	if confData["watch-checks"] != nil {
+		watchChecks = confData["watch-checks"].(bool)
+	} else {
+		watchChecks = arguments["--watch-checks"].(bool)
+	}
+	if confData["watch-events"] != nil {
+		watchEvents = confData["watch-events"].(bool)
+	} else {
+		watchEvents = arguments["--watch-events"].(bool)
+	}
 
 	if loglevelString != "" {
 		loglevel, err := log.ParseLevel(loglevelString)
@@ -69,8 +132,6 @@ func daemonMode(arguments map[string]interface{}) {
 		}
 	}
 
-	addr := arguments["--alert-addr"].(string)
-
 	url := fmt.Sprintf("http://%s/v1/info", addr)
 	resp, err := http.Get(url)
 	if err == nil && resp.StatusCode == 201 {
@@ -80,12 +141,6 @@ func daemonMode(arguments map[string]interface{}) {
 		os.Exit(1)
 	}
 
-	consulAclToken := arguments["--consul-acl-token"].(string)
-	consulAddr := arguments["--consul-addr"].(string)
-	consulDc := arguments["--consul-dc"].(string)
-	watchChecks := arguments["--watch-checks"].(bool)
-	watchEvents := arguments["--watch-events"].(bool)
-
 	consulClient, err = consul.NewClient(consulAddr, consulDc, consulAclToken)
 	if err != nil {
 		log.Println("Cluster has no leader or is unreacheable.", err)
@@ -94,7 +149,6 @@ func daemonMode(arguments map[string]interface{}) {
 
 	hostname, _ := os.Hostname()
 
-	log.Println("Consul ACL Token:", consulAclToken)
 	log.Println("Consul Alerts daemon started")
 	log.Println("Consul Alerts Host:", hostname)
 	log.Println("Consul Agent:", consulAddr)
@@ -109,6 +163,7 @@ func daemonMode(arguments map[string]interface{}) {
 	http.HandleFunc("/v1/info", infoHandler)
 	http.HandleFunc("/v1/process/events", ep.eventHandler)
 	http.HandleFunc("/v1/process/checks", cp.checkHandler)
+	http.HandleFunc("/v1/health/wildcard", healthWildcardHandler)
 	http.HandleFunc("/v1/health", healthHandler)
 	go startAPI(addr)
 
@@ -181,99 +236,54 @@ func cleanup(stopables ...stopable) {
 	}
 }
 
-func builtinNotifiers() []notifier.Notifier {
+func builtinNotifiers() map[string]notifier.Notifier {
 
-	emailConfig := consulClient.EmailConfig()
-	logConfig := consulClient.LogConfig()
-	influxdbConfig := consulClient.InfluxdbConfig()
-	slackConfig := consulClient.SlackConfig()
-	pagerdutyConfig := consulClient.PagerDutyConfig()
-	hipchatConfig := consulClient.HipChatConfig()
-	opsgenieConfig := consulClient.OpsGenieConfig()
-	awssnsConfig := consulClient.AwsSnsConfig()
+	emailNotifier := consulClient.EmailNotifier()
+	logNotifier := consulClient.LogNotifier()
+	influxdbNotifier := consulClient.InfluxdbNotifier()
+	slackNotifier := consulClient.SlackNotifier()
+	mattermostNotifier := consulClient.MattermostNotifier()
+	mattermostWebhookNotifier := consulClient.MattermostWebhookNotifier()
+	pagerdutyNotifier := consulClient.PagerDutyNotifier()
+	hipchatNotifier := consulClient.HipChatNotifier()
+	opsgenieNotifier := consulClient.OpsGenieNotifier()
+	awssnsNotifier := consulClient.AwsSnsNotifier()
+	victoropsNotifier := consulClient.VictorOpsNotifier()
 
-	notifiers := []notifier.Notifier{}
-	if emailConfig.Enabled {
-		emailNotifier := &notifier.EmailNotifier{
-			Url:         emailConfig.Url,
-			Port:        emailConfig.Port,
-			Username:    emailConfig.Username,
-			Password:    emailConfig.Password,
-			SenderAlias: emailConfig.SenderAlias,
-			SenderEmail: emailConfig.SenderEmail,
-			Receivers:   emailConfig.Receivers,
-			Template:    emailConfig.Template,
-			ClusterName: emailConfig.ClusterName,
-			NotifName:   "email",
-		}
-		notifiers = append(notifiers, emailNotifier)
+	notifiers := map[string]notifier.Notifier{}
+	if emailNotifier.Enabled {
+		notifiers[emailNotifier.NotifierName()] = emailNotifier
 	}
-	if logConfig.Enabled {
-		logNotifier := &notifier.LogNotifier{
-			LogFile:   logConfig.Path,
-			NotifName: "log",
-		}
-		notifiers = append(notifiers, logNotifier)
+	if logNotifier.Enabled {
+		notifiers[logNotifier.NotifierName()] = logNotifier
 	}
-	if influxdbConfig.Enabled {
-		influxdbNotifier := &notifier.InfluxdbNotifier{
-			Host:       influxdbConfig.Host,
-			Username:   influxdbConfig.Username,
-			Password:   influxdbConfig.Password,
-			Database:   influxdbConfig.Database,
-			SeriesName: influxdbConfig.SeriesName,
-			NotifName:  "influx",
-		}
-		notifiers = append(notifiers, influxdbNotifier)
+	if influxdbNotifier.Enabled {
+		notifiers[influxdbNotifier.NotifierName()] = influxdbNotifier
 	}
-	if slackConfig.Enabled {
-		slackNotifier := &notifier.SlackNotifier{
-			ClusterName: slackConfig.ClusterName,
-			Url:         slackConfig.Url,
-			Channel:     slackConfig.Channel,
-			Username:    slackConfig.Username,
-			IconUrl:     slackConfig.IconUrl,
-			IconEmoji:   slackConfig.IconEmoji,
-			Detailed:    slackConfig.Detailed,
-			NotifName:   "slack",
-		}
-		notifiers = append(notifiers, slackNotifier)
+	if slackNotifier.Enabled {
+		notifiers[slackNotifier.NotifierName()] = slackNotifier
 	}
-	if pagerdutyConfig.Enabled {
-		pagerdutyNotifier := &notifier.PagerDutyNotifier{
-			ServiceKey: pagerdutyConfig.ServiceKey,
-			ClientName: pagerdutyConfig.ClientName,
-			ClientUrl:  pagerdutyConfig.ClientUrl,
-			NotifName:  "pagerduty",
-		}
-		notifiers = append(notifiers, pagerdutyNotifier)
+	if mattermostNotifier.Enabled {
+		notifiers[mattermostNotifier.NotifierName()] = mattermostNotifier
 	}
-	if hipchatConfig.Enabled {
-		hipchatNotifier := &notifier.HipChatNotifier{
-			ClusterName: hipchatConfig.ClusterName,
-			RoomId:      hipchatConfig.RoomId,
-			AuthToken:   hipchatConfig.AuthToken,
-			BaseURL:     hipchatConfig.BaseURL,
-			From:        hipchatConfig.From,
-			NotifName:   "hipchat",
-		}
-		notifiers = append(notifiers, hipchatNotifier)
+	if mattermostWebhookNotifier.Enabled {
+		notifiers[mattermostWebhookNotifier.NotifierName()] = mattermostWebhookNotifier
 	}
-	if opsgenieConfig.Enabled {
-		opsgenieNotifier := &notifier.OpsGenieNotifier{
-			ClusterName: opsgenieConfig.ClusterName,
-			ApiKey:      opsgenieConfig.ApiKey,
-			NotifName:   "opsgenie",
-		}
-		notifiers = append(notifiers, opsgenieNotifier)
+	if pagerdutyNotifier.Enabled {
+		notifiers[pagerdutyNotifier.NotifierName()] = pagerdutyNotifier
 	}
-	if awssnsConfig.Enabled {
-		awssnsNotifier := &notifier.AwsSnsNotifier{
-			Region:    awssnsConfig.Region,
-			TopicArn:  awssnsConfig.TopicArn,
-			NotifName: "awssns",
-		}
-		notifiers = append(notifiers, awssnsNotifier)
+	if hipchatNotifier.Enabled {
+		notifiers[hipchatNotifier.NotifierName()] = hipchatNotifier
+	}
+	if opsgenieNotifier.Enabled {
+		notifiers[opsgenieNotifier.NotifierName()] = opsgenieNotifier
+	}
+	if awssnsNotifier.Enabled {
+		notifiers[awssnsNotifier.NotifierName()] = awssnsNotifier
+	}
+
+	if victoropsNotifier.Enabled {
+		notifiers[victoropsNotifier.NotifierName()] = victoropsNotifier
 	}
 
 	return notifiers

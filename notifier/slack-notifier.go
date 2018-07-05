@@ -14,7 +14,7 @@ import (
 )
 
 type SlackNotifier struct {
-	ClusterName string       `json:"-"`
+	ClusterName string       `json:"cluster_name"`
 	Url         string       `json:"-"`
 	Channel     string       `json:"channel"`
 	Username    string       `json:"username"`
@@ -23,7 +23,7 @@ type SlackNotifier struct {
 	Text        string       `json:"text,omitempty"`
 	Attachments []attachment `json:"attachments,omitempty"`
 	Detailed    bool         `json:"-"`
-	NotifName   string
+	Enabled     bool
 }
 
 type attachment struct {
@@ -36,7 +36,12 @@ type attachment struct {
 
 // NotifierName provides name for notifier selection
 func (slack *SlackNotifier) NotifierName() string {
-	return slack.NotifName
+	return "slack"
+}
+
+func (slack *SlackNotifier) Copy() Notifier {
+	notifier := *slack
+	return &notifier
 }
 
 //Notify sends messages to the endpoint notifier
@@ -94,7 +99,10 @@ func (slack *SlackNotifier) notifyDetailed(messages Messages) bool {
 
 	for _, message := range messages {
 		detailedBody += fmt.Sprintf("\n*[%s:%s]* %s is *%s.*", message.Node, message.Service, message.Check, message.Status)
-		detailedBody += fmt.Sprintf("\n`%s`", strings.TrimSpace(message.Output))
+		var msg = strings.TrimSpace(message.Output)
+		if len(msg) != 0 {
+			detailedBody += fmt.Sprintf("\n```%s```", msg)
+		}
 	}
 
 	a := attachment{

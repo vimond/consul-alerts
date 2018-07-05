@@ -2,7 +2,10 @@ package notifier
 
 import (
 	"fmt"
+	"html"
 	"net/url"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/AcalephStorage/consul-alerts/Godeps/_workspace/src/github.com/tbruyelle/hipchat-go/hipchat"
 
@@ -10,17 +13,22 @@ import (
 )
 
 type HipChatNotifier struct {
-	ClusterName string
-	RoomId      string
-	AuthToken   string
-	BaseURL     string
-	From        string
-	NotifName   string
+	Enabled     bool
+	ClusterName string `json:"cluster-name"`
+	RoomId      string `json:"room-id"`
+	AuthToken   string `json:"auth-token"`
+	BaseURL     string `json:"base-url"`
+	From        string `json:"from"`
 }
 
 // NotifierName provides name for notifier selection
 func (notifier *HipChatNotifier) NotifierName() string {
-	return notifier.NotifName
+	return "hipchat"
+}
+
+func (notifier *HipChatNotifier) Copy() Notifier {
+	n := *notifier
+	return &n
 }
 
 //Notify sends messages to the endpoint notifier
@@ -28,11 +36,14 @@ func (notifier *HipChatNotifier) Notify(messages Messages) bool {
 
 	overallStatus, pass, warn, fail := messages.Summary()
 
-	text := fmt.Sprintf(header, notifier.ClusterName, overallStatus, fail, warn, pass)
+	text := fmt.Sprintf("%s is <STRONG>%s</STRONG>. Fail: %d, Warn: %d, Pass: %d", notifier.ClusterName, overallStatus, fail, warn, pass)
 
 	for _, message := range messages {
-		text += fmt.Sprintf("\n%s:%s:%s is %s.", message.Node, message.Service, message.Check, message.Status)
-		text += fmt.Sprintf("\n%s", message.Output)
+		text += fmt.Sprintf("<BR><STRONG><CODE>%s</CODE></STRONG>:%s:%s is <STRONG>%s</STRONG>.",
+			message.Node, html.EscapeString(message.Service), html.EscapeString(message.Check), message.Status)
+		if utf8.RuneCountInString(message.Output) > 0 {
+			text += fmt.Sprintf("<BR>%s", strings.Replace(html.EscapeString(strings.TrimSpace(message.Output)), "\n", "<BR>", -1))
+		}
 	}
 
 	level := "green"
@@ -57,12 +68,15 @@ func (notifier *HipChatNotifier) Notify(messages Messages) bool {
 	}
 
 	notifRq := &hipchat.NotificationRequest{
-		From:    from,
-		Message: text,
-		Color:   level,
-		Notify:  true,
+		Color:         level,
+		Message:       text,
+		Notify:        true,
+		MessageFormat: "html",
+		From:          from,
 	}
+
 	resp, err := client.Room.Notification(notifier.RoomId, notifRq)
+
 	if err != nil {
 		log.Printf("Error sending notification to hipchat: %s\n", err)
 		log.Printf("Server returns %+v\n", resp)

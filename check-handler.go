@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"time"
 
 	"net/http"
@@ -57,12 +58,26 @@ func (c *CheckProcessor) reminderRun() {
 	messages := consulClient.GetReminders()
 	filteredMessages := make(notifier.Messages, 0)
 	for _, message := range messages {
-		duration := time.Since(message.Timestamp)
-		durMins := int(duration.Minutes())
+		check := &consul.Check{
+			Node:        message.Node,
+			CheckID:     message.CheckId,
+			Name:        message.Check,
+			Status:      message.Status,
+			Notes:       message.Notes,
+			Output:      message.Output,
+			ServiceID:   message.ServiceId,
+			ServiceName: message.Service,
+		}
+		if consulClient.IsBlacklisted(check) {
+			log.Printf("%s:%s:%s is blacklisted, deleting reminder", check.Node, check.ServiceID, check.CheckID)
+			consulClient.DeleteReminder(check.Node, check.CheckID)
+			continue
+		}
+		duration := time.Since(message.RmdCheck)
+		durMins := int(math.Ceil(duration.Minutes()))
 		log.Println("Reminder message duration minutes: ", durMins)
-		totalInterval := message.IntCount * message.Interval
-		if durMins >= totalInterval {
-			message.IntCount++
+		if durMins >= message.Interval {
+			message.RmdCheck = time.Now()
 			consulClient.SetReminder(message)
 			filteredMessages = append(filteredMessages, message)
 		}
@@ -108,25 +123,26 @@ func (c *CheckProcessor) handleChecks(checks []consul.Check) {
 func (c *CheckProcessor) notify(alerts []consul.Check) {
 	messages := make([]notifier.Message, len(alerts))
 	for i, alert := range alerts {
-		notifMap, interval := consulClient.GetProfileInfo(alert.Node, alert.ServiceID, alert.CheckID)
+		profileInfo := consulClient.GetProfileInfo(alert.Node, alert.ServiceID, alert.CheckID)
 		messages[i] = notifier.Message{
-			Node:      alert.Node,
-			ServiceId: alert.ServiceID,
-			Service:   alert.ServiceName,
-			CheckId:   alert.CheckID,
-			Check:     alert.Name,
-			Status:    alert.Status,
-			Output:    alert.Output,
-			Notes:     alert.Notes,
-			Interval:  interval,
-			IntCount:  1,
-			NotifList: notifMap,
-			Timestamp: time.Now(),
+			Node:         alert.Node,
+			ServiceId:    alert.ServiceID,
+			Service:      alert.ServiceName,
+			CheckId:      alert.CheckID,
+			Check:        alert.Name,
+			Status:       alert.Status,
+			Output:       alert.Output,
+			Notes:        alert.Notes,
+			Interval:     profileInfo.Interval,
+			RmdCheck:     time.Now(),
+			NotifList:    profileInfo.NotifList,
+			VarOverrides: profileInfo.VarOverrides,
+			Timestamp:    time.Now(),
 		}
-		if interval > 0 {
+		if profileInfo.Interval > 0 {
 			switch alert.Status {
 			case "passing":
-				consulClient.DeleteReminder(alert.Node)
+				consulClient.DeleteReminder(alert.Node, alert.CheckID)
 			case "warning", "critical":
 				consulClient.SetReminder(messages[i])
 			}
